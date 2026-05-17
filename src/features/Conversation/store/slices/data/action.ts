@@ -9,6 +9,7 @@ import { messageService } from '@/services/message';
 import { messageMapKey } from '@/store/chat/utils/messageMapKey';
 
 import { type Store as ConversationStore } from '../../action';
+import { conversationFetchMessagesKey } from './fetchKey';
 import { type MessageDispatch } from './reducer';
 import { messagesReducer } from './reducer';
 import { dataSelectors } from './selectors';
@@ -20,9 +21,11 @@ const mergeFetchedMessagesWithLocalState = (
   fetchedMessages: UIChatMessage[],
   localMessages: UIChatMessage[],
 ): UIChatMessage[] => {
-  if (localMessages.length === 0 || fetchedMessages.length === 0) return fetchedMessages;
+  if (localMessages.length === 0) return fetchedMessages;
+  if (fetchedMessages.length === 0) return localMessages;
 
   const localById = new Map(localMessages.map((message) => [message.id, message]));
+  const fetchedIds = new Set(fetchedMessages.map((message) => message.id));
   let changed = false;
 
   const mergedMessages = fetchedMessages.map((message) => {
@@ -34,6 +37,12 @@ const mergeFetchedMessagesWithLocalState = (
     changed = true;
     return localMessage;
   });
+
+  for (const message of localMessages) {
+    if (fetchedIds.has(message.id)) continue;
+    changed = true;
+    mergedMessages.push(message);
+  }
 
   return changed ? mergedMessages : fetchedMessages;
 };
@@ -202,7 +211,7 @@ export const dataSlice: StateCreator<
     );
 
     return useClientDataSWRWithSync<UIChatMessage[]>(
-      shouldFetch ? ['CONVERSATION_FETCH_MESSAGES', context] : null,
+      shouldFetch ? conversationFetchMessagesKey(context) : null,
 
       () => messageService.getMessages(context),
       {

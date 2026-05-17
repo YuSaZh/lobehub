@@ -4,10 +4,13 @@ import { type Mock } from 'vitest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { LOADING_FLAT } from '@/const/message';
+import { globalAgentContextManager } from '@/helpers/GlobalAgentContextManager';
 import { mutate } from '@/libs/swr';
 import { chatService } from '@/services/chat';
+import { heterogeneousAgentService } from '@/services/electron/heterogeneousAgent';
 import { messageService } from '@/services/message';
 import { topicService } from '@/services/topic';
+import { useAgentStore } from '@/store/agent';
 import { PortalViewType } from '@/store/chat/slices/portal/initialState';
 import { messageMapKey } from '@/store/chat/utils/messageMapKey';
 import { topicMapKey } from '@/store/chat/utils/topicMapKey';
@@ -15,6 +18,14 @@ import { useSessionStore } from '@/store/session';
 import { type ChatTopic } from '@/types/topic';
 
 import { useChatStore } from '../../store';
+
+vi.mock('@lobechat/const', async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...(actual as object),
+    isDesktop: true,
+  };
+});
 
 // Mock @/libs/swr mutate
 vi.mock('@/libs/swr', async () => {
@@ -41,6 +52,7 @@ vi.mock('@/services/topic', () => ({
     batchRemoveTopics: vi.fn(),
     getTopics: vi.fn(),
     searchTopics: vi.fn(),
+    updateTopicMetadata: vi.fn(),
   },
 }));
 
@@ -49,6 +61,14 @@ vi.mock('@/services/message', () => ({
     removeMessages: vi.fn(),
     removeMessagesByAssistant: vi.fn(),
     getMessages: vi.fn(),
+    createMessage: vi.fn(),
+    updateMessage: vi.fn(),
+  },
+}));
+
+vi.mock('@/services/electron/heterogeneousAgent', () => ({
+  heterogeneousAgentService: {
+    getClaudeCodeSessionHistory: vi.fn(),
   },
 }));
 
@@ -757,9 +777,8 @@ describe('topic action', () => {
       const { result } = renderHook(() => useChatStore());
       const refreshSpy = vi.spyOn(result.current, 'refreshMessages').mockResolvedValue(undefined);
 
-      // Fire two overlapping switches: the sync body of both runs before
-      // either yields, so by the microtask boundary the second has already
-      // bumped the epoch and the first should bail out before fetching.
+      // Fire two overlapping switches before either reaches the microtask
+      // boundary; the first should bail out before fetching messages.
       await act(async () => {
         const p1 = result.current.switchTopic('topic-a');
         const p2 = result.current.switchTopic('topic-b');
@@ -768,6 +787,108 @@ describe('topic action', () => {
 
       expect(refreshSpy).toHaveBeenCalledTimes(1);
       expect(useChatStore.getState().activeTopicId).toBe('topic-b');
+    });
+
+    it('syncs Claude Code history for a URL-hydrated active topic using agent working directory fallback', async () => {
+      const { result } = renderHook(() => useChatStore());
+      const topicId = 'topic-claude-code';
+      const agentId = 'agent-claude-code';
+      const createdMessage = { id: 'imported-user-message' } as UIChatMessage;
+      const latestMessages = [createdMessage] as UIChatMessage[];
+
+      useChatStore.setState(
+        {
+          activeAgentId: agentId,
+          activeTopicId: topicId,
+          topicDataMap: {
+            [`agent_${agentId}`]: {
+              currentPage: 0,
+              hasMore: false,
+              items: [
+                {
+                  id: topicId,
+                  metadata: { heteroSessionId: 'cc-session-id' },
+                  title: 'Claude Code Topic',
+                } as ChatTopic,
+              ],
+              pageSize: 20,
+              total: 1,
+            },
+          },
+        },
+        false,
+      );
+      useAgentStore.setState(
+        {
+          agentMap: {
+            [agentId]: {
+              agencyConfig: {
+                heterogeneousProvider: { command: 'claude', type: 'claude-code' },
+              },
+            } as any,
+          },
+        },
+        false,
+      );
+      globalAgentContextManager.setContext({ homePath: '/home/user/project' });
+
+      vi.mocked(messageService.getMessages)
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce(latestMessages);
+      vi.mocked(messageService.createMessage).mockResolvedValue(createdMessage as any);
+      vi.mocked(topicService.updateTopicMetadata).mockResolvedValue(undefined as never);
+      vi.mocked(heterogeneousAgentService.getClaudeCodeSessionHistory).mockResolvedValue({
+        messages: [
+          {
+            content: 'new imported message',
+            lineNumber: 1,
+            role: 'user',
+            sourceEventId: 'cc-session-id:event-1',
+            timestamp: '2026-05-17T00:00:00.000Z',
+          },
+        ],
+        sessionFile: '/home/user/.claude/projects/project/cc-session-id.jsonl',
+        sessionId: 'cc-session-id',
+        status: 'found',
+      });
+
+      let syncResult: Awaited<ReturnType<typeof result.current.syncClaudeCodeHistory>>;
+      await act(async () => {
+        syncResult = await result.current.syncClaudeCodeHistory(topicId);
+      });
+
+      expect(syncResult!).toBe('synced');
+
+      expect(heterogeneousAgentService.getClaudeCodeSessionHistory).toHaveBeenCalledWith({
+        sessionId: 'cc-session-id',
+        workingDirectory: expect.any(String),
+      });
+      expect(messageService.createMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          agentId,
+          content: 'new imported message',
+          metadata: expect.objectContaining({
+            claudeCode: expect.objectContaining({ sourceEventId: 'cc-session-id:event-1' }),
+            importedFrom: 'claude-code-history',
+          }),
+          role: 'user',
+          topicId,
+        }),
+      );
+      expect(topicService.updateTopicMetadata).toHaveBeenCalledWith(
+        topicId,
+        expect.objectContaining({
+          claudeCodeHistoryLastEventId: 'cc-session-id:event-1',
+        }),
+      );
+      expect(mutate).toHaveBeenCalledWith(
+        ['CONVERSATION_FETCH_MESSAGES', { agentId, scope: 'main', threadId: null, topicId }],
+        latestMessages,
+        { revalidate: false },
+      );
+      expect(useChatStore.getState().dbMessagesMap[`main_${agentId}_${topicId}`]).toBe(
+        latestMessages,
+      );
     });
   });
   describe('removeSessionTopics', () => {
