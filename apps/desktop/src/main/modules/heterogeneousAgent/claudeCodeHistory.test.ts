@@ -119,6 +119,30 @@ describe('getClaudeCodeSessionHistory', () => {
     ]);
   });
 
+  it('rejects session ids with path separators before reading session files', async () => {
+    const cwd = path.join(homeDir, 'workspace');
+    const leakDir = path.join(homeDir, 'tmp');
+    await mkdir(leakDir, { recursive: true });
+    await writeJsonl(path.join(leakDir, 'leak.jsonl'), [
+      {
+        message: { content: 'leaked history', role: 'user' },
+        uuid: 'uuid-leak',
+      },
+    ]);
+
+    const unsafeSessionIds = ['../../tmp/leak', '..\\..\\tmp\\leak', '/tmp/leak', 'C:\\tmp\\leak'];
+
+    for (const sessionId of unsafeSessionIds) {
+      await expect(
+        getClaudeCodeSessionHistory({ sessionId, workingDirectory: cwd }),
+      ).resolves.toEqual({
+        messages: [],
+        sessionId,
+        status: 'invalid_request',
+      });
+    }
+  });
+
   it('returns missing when the session file cannot be found', async () => {
     const result = await getClaudeCodeSessionHistory({
       sessionId: 'missing-session',

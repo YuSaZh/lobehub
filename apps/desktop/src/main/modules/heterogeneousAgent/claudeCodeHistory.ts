@@ -19,6 +19,17 @@ const normalizePathForClaudeProject = (cwd: string): string => {
   return normalized.replaceAll(/[^A-Z0-9]/gi, '-');
 };
 
+const isSafeSessionId = (sessionId: string): boolean => {
+  const trimmed = sessionId.trim();
+
+  if (!trimmed || trimmed !== sessionId) return false;
+  if (sessionId === '.' || sessionId === '..') return false;
+  if (sessionId.includes('/') || sessionId.includes('\\') || sessionId.includes(':')) return false;
+  if (path.isAbsolute(sessionId)) return false;
+
+  return path.basename(sessionId) === sessionId;
+};
+
 const stableEventId = (sessionId: string, lineNumber: number, value: Record<string, unknown>) => {
   const uuid = typeof value.uuid === 'string' ? value.uuid : undefined;
   if (uuid) return `${sessionId}:${uuid}`;
@@ -277,7 +288,7 @@ export const getClaudeCodeSessionHistory = async ({
   sessionId: string;
   workingDirectory: string;
 }): Promise<ClaudeCodeSessionHistoryResult> => {
-  if (!sessionId || !workingDirectory) {
+  if (!sessionId || !workingDirectory || !isSafeSessionId(sessionId)) {
     return { messages: [], sessionId, status: 'invalid_request' };
   }
 
