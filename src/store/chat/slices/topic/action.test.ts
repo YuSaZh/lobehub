@@ -789,6 +789,76 @@ describe('topic action', () => {
       expect(useChatStore.getState().activeTopicId).toBe('topic-b');
     });
 
+    it.each([
+      {
+        history: {
+          messages: [],
+          sessionId: 'cc-session-id',
+          status: 'missing' as const,
+        },
+        label: 'missing',
+      },
+      {
+        history: {
+          messages: [],
+          sessionFile: '/home/user/.claude/projects/project/cc-session-id.jsonl',
+          sessionId: 'cc-session-id',
+          status: 'found' as const,
+        },
+        label: 'empty',
+      },
+    ])('skips $label Claude Code history so hydration can retry later', async ({ history }) => {
+      const { result } = renderHook(() => useChatStore());
+      const topicId = 'topic-claude-code';
+      const agentId = 'agent-claude-code';
+
+      useChatStore.setState(
+        {
+          activeAgentId: agentId,
+          activeTopicId: topicId,
+          topicDataMap: {
+            [`agent_${agentId}`]: {
+              currentPage: 0,
+              hasMore: false,
+              items: [
+                {
+                  id: topicId,
+                  metadata: { heteroSessionId: 'cc-session-id' },
+                  title: 'Claude Code Topic',
+                } as ChatTopic,
+              ],
+              pageSize: 20,
+              total: 1,
+            },
+          },
+        },
+        false,
+      );
+      useAgentStore.setState(
+        {
+          agentMap: {
+            [agentId]: {
+              agencyConfig: {
+                heterogeneousProvider: { command: 'claude', type: 'claude-code' },
+              },
+            } as any,
+          },
+        },
+        false,
+      );
+      globalAgentContextManager.setContext({ homePath: '/home/user/project' });
+      vi.mocked(heterogeneousAgentService.getClaudeCodeSessionHistory).mockResolvedValue(history);
+
+      let syncResult: Awaited<ReturnType<typeof result.current.syncClaudeCodeHistory>>;
+      await act(async () => {
+        syncResult = await result.current.syncClaudeCodeHistory(topicId);
+      });
+
+      expect(syncResult!).toBe('skipped');
+      expect(messageService.getMessages).not.toHaveBeenCalled();
+      expect(topicService.updateTopicMetadata).not.toHaveBeenCalled();
+    });
+
     it('syncs Claude Code history for a URL-hydrated active topic using agent working directory fallback', async () => {
       const { result } = renderHook(() => useChatStore());
       const topicId = 'topic-claude-code';

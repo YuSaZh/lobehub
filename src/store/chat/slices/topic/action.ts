@@ -467,7 +467,13 @@ export class ChatTopicActionImpl {
     if (epoch !== this.#claudeCodeHistorySyncEpoch || this.#get().activeTopicId !== topicId) {
       return 'skipped';
     }
-    if (history.status !== 'found' || history.messages.length === 0) {
+    if (
+      history.status === 'missing' ||
+      (history.status === 'found' && history.messages.length === 0)
+    ) {
+      return 'skipped';
+    }
+    if (history.status !== 'found') {
       return 'upToDate';
     }
 
