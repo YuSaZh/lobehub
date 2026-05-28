@@ -27,6 +27,7 @@ vi.mock('@lobehub/ui/icons', () => ({
 
 vi.mock('lucide-react', () => ({
   MessageSquarePlusIcon: () => null,
+  MessagesSquareIcon: () => null,
   RadioTowerIcon: () => null,
   SearchIcon: () => null,
 }));
@@ -89,7 +90,7 @@ vi.mock('@/store/agent', () => ({
 
 vi.mock('@/store/agent/selectors', () => ({
   agentSelectors: {
-    isCurrentAgentHeterogeneous: () => false,
+    currentAgentHeterogeneousProviderType: () => undefined,
   },
 }));
 
