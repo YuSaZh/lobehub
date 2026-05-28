@@ -163,6 +163,197 @@ describe('ChatHydration', () => {
     });
   });
 
+  it('does not trigger Claude Code history sync for non-Claude-Code providers', async () => {
+    const syncClaudeCodeHistory = vi.fn().mockResolvedValue('synced');
+    useChatStore.setState(
+      {
+        syncClaudeCodeHistory,
+        topicDataMap: {
+          agent_agt_test: {
+            currentPage: 0,
+            hasMore: false,
+            items: [{ id: 'tpc_123', metadata: { heteroSessionId: 'cc-session' } } as any],
+            pageSize: 20,
+            total: 1,
+          },
+        },
+      },
+      false,
+    );
+    useAgentStore.setState(
+      {
+        activeAgentId: 'agt_test',
+        agentMap: {
+          agt_test: {
+            agencyConfig: {
+              heterogeneousProvider: { type: 'codex' },
+            },
+          } as any,
+        },
+      },
+      false,
+    );
+    useParamsMock.mockReturnValue({ aid: 'agt_test', topicId: 'tpc_123' });
+    useLocationMock.mockReturnValue({
+      hash: '',
+      pathname: '/agent/agt_test/tpc_123',
+      search: '',
+    });
+    useSearchParamsMock.mockReturnValue([new URLSearchParams(''), setSearchParamsMock]);
+
+    render(<ChatHydration />);
+
+    await waitFor(() => {
+      expect(useChatStore.getState().activeTopicId).toBe('tpc_123');
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(syncClaudeCodeHistory).not.toHaveBeenCalled();
+  });
+
+  it('does not trigger Claude Code history sync without a routed session id', async () => {
+    const syncClaudeCodeHistory = vi.fn().mockResolvedValue('synced');
+    useChatStore.setState(
+      {
+        syncClaudeCodeHistory,
+        topicDataMap: {
+          agent_agt_test: {
+            currentPage: 0,
+            hasMore: false,
+            items: [{ id: 'tpc_123', metadata: {} } as any],
+            pageSize: 20,
+            total: 1,
+          },
+        },
+      },
+      false,
+    );
+    useParamsMock.mockReturnValue({ aid: 'agt_test', topicId: 'tpc_123' });
+    useLocationMock.mockReturnValue({
+      hash: '',
+      pathname: '/agent/agt_test/tpc_123',
+      search: '',
+    });
+    useSearchParamsMock.mockReturnValue([new URLSearchParams(''), setSearchParamsMock]);
+
+    render(<ChatHydration />);
+
+    await waitFor(() => {
+      expect(useChatStore.getState().activeTopicId).toBe('tpc_123');
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(syncClaudeCodeHistory).not.toHaveBeenCalled();
+  });
+
+  it('allows a new route topic to sync after the previous route topic completed', async () => {
+    const syncClaudeCodeHistory = vi.fn().mockResolvedValue('synced');
+    useChatStore.setState(
+      {
+        syncClaudeCodeHistory,
+        topicDataMap: {
+          agent_agt_test: {
+            currentPage: 0,
+            hasMore: false,
+            items: [
+              { id: 'tpc_123', metadata: { heteroSessionId: 'cc-session-1' } } as any,
+              { id: 'tpc_456', metadata: { heteroSessionId: 'cc-session-2' } } as any,
+            ],
+            pageSize: 20,
+            total: 2,
+          },
+        },
+      },
+      false,
+    );
+    useParamsMock.mockReturnValue({ aid: 'agt_test', topicId: 'tpc_123' });
+    useLocationMock.mockReturnValue({
+      hash: '',
+      pathname: '/agent/agt_test/tpc_123',
+      search: '',
+    });
+    useSearchParamsMock.mockReturnValue([new URLSearchParams(''), setSearchParamsMock]);
+
+    render(<ChatHydration />);
+
+    await waitFor(() => {
+      expect(syncClaudeCodeHistory).toHaveBeenCalledWith('tpc_123');
+    });
+
+    useParamsMock.mockReturnValue({ aid: 'agt_test', topicId: 'tpc_456' });
+    useLocationMock.mockReturnValue({
+      hash: '',
+      pathname: '/agent/agt_test/tpc_456',
+      search: '',
+    });
+    act(() => {
+      useChatStore.setState({ activeTopicId: null }, false);
+    });
+
+    await waitFor(() => {
+      expect(useChatStore.getState().activeTopicId).toBe('tpc_456');
+      expect(syncClaudeCodeHistory).toHaveBeenCalledWith('tpc_456');
+    });
+    expect(syncClaudeCodeHistory).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not permanently mark routed sync as complete after a rejected sync attempt', async () => {
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const syncClaudeCodeHistory = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('sync failed'))
+      .mockResolvedValueOnce('synced');
+    useChatStore.setState(
+      {
+        syncClaudeCodeHistory,
+        topicDataMap: {
+          agent_agt_test: {
+            currentPage: 0,
+            hasMore: false,
+            items: [{ id: 'tpc_123', metadata: { heteroSessionId: 'cc-session' } } as any],
+            pageSize: 20,
+            total: 1,
+          },
+        },
+      },
+      false,
+    );
+    useParamsMock.mockReturnValue({ aid: 'agt_test', topicId: 'tpc_123' });
+    useLocationMock.mockReturnValue({
+      hash: '',
+      pathname: '/agent/agt_test/tpc_123',
+      search: '',
+    });
+    useSearchParamsMock.mockReturnValue([new URLSearchParams(''), setSearchParamsMock]);
+
+    render(<ChatHydration />);
+
+    await waitFor(() => {
+      expect(syncClaudeCodeHistory).toHaveBeenCalledTimes(1);
+      expect(consoleErrorSpy).toHaveBeenCalled();
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    act(() => {
+      useChatStore.setState({ activeTopicId: 'tpc_previous' }, false);
+    });
+    act(() => {
+      useChatStore.setState({ activeTopicId: 'tpc_123' }, false);
+    });
+
+    await waitFor(() => {
+      expect(syncClaudeCodeHistory).toHaveBeenCalledTimes(2);
+    });
+
+    consoleErrorSpy.mockRestore();
+  });
+
   it('does not mark routed sync as complete when the topic is not active yet', async () => {
     const syncClaudeCodeHistory = vi.fn().mockResolvedValue('skipped');
     useChatStore.setState(

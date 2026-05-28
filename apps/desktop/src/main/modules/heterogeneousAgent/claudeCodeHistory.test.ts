@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, truncate, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -117,6 +117,156 @@ describe('getClaudeCodeSessionHistory', () => {
         uuid: 'uuid-tool-1',
       },
     ]);
+  });
+
+  it('skips malformed rows and extracts reasoning and tool-only assistant messages', async () => {
+    const sessionId = 'session-parser';
+    const cwd = path.join(homeDir, 'workspace');
+    const projectDir = path.join(homeDir, '.claude', 'projects', encodeClaudeProjectDir(cwd));
+    await mkdir(projectDir, { recursive: true });
+    const sessionFile = path.join(projectDir, `${sessionId}.jsonl`);
+
+    await writeFile(
+      sessionFile,
+      [
+        '',
+        'not json',
+        JSON.stringify({
+          message: {
+            content: [
+              { thinking: 'hidden chain of thought', type: 'thinking' },
+              { text: 'visible answer', type: 'text' },
+            ],
+            role: 'assistant',
+          },
+          uuid: 'uuid-thinking',
+        }),
+        JSON.stringify({
+          message: {
+            content: [
+              { id: 'toolu_only', input: { command: 'pwd' }, name: 'Bash', type: 'tool_use' },
+            ],
+            role: 'assistant',
+          },
+          uuid: 'uuid-tool-only',
+        }),
+        JSON.stringify({ message: { content: 'ignored system row', role: 'system' } }),
+        JSON.stringify({
+          message: { content: [{ text: 'ignored block', type: 'unknown' }], role: 'assistant' },
+          uuid: 'uuid-empty-assistant',
+        }),
+        JSON.stringify({
+          message: { content: { nested: true }, role: 'user' },
+          uuid: 'uuid-object-content',
+        }),
+      ].join('\n'),
+    );
+
+    const result = await getClaudeCodeSessionHistory({ sessionId, workingDirectory: cwd });
+
+    expect(result.status).toBe('found');
+    expect(result.messages).toMatchObject([
+      {
+        content: 'visible answer',
+        lineNumber: 3,
+        reasoning: 'hidden chain of thought',
+        role: 'assistant',
+        sourceEventId: `${sessionId}:uuid-thinking`,
+      },
+      {
+        content: '',
+        lineNumber: 4,
+        role: 'assistant',
+        sourceEventId: `${sessionId}:uuid-tool-only`,
+        tools: [{ arguments: '{\n  "command": "pwd"\n}', id: 'toolu_only', name: 'Bash' }],
+      },
+      {
+        content: '{\n  "nested": true\n}',
+        lineNumber: 7,
+        role: 'user',
+        sourceEventId: `${sessionId}:uuid-object-content`,
+      },
+    ]);
+  });
+
+  it('finds matching session files in nested project folders during bounded scan', async () => {
+    const sessionId = 'session-nested';
+    const cwd = path.join(homeDir, 'workspace');
+    const nestedDir = path.join(
+      homeDir,
+      '.claude',
+      'projects',
+      encodeClaudeProjectDir(cwd),
+      'nested',
+    );
+    await mkdir(nestedDir, { recursive: true });
+    const sessionFile = path.join(nestedDir, `${sessionId}.jsonl`);
+    await writeJsonl(sessionFile, [
+      { message: { content: 'nested history', role: 'user' }, uuid: 'uuid-nested' },
+    ]);
+
+    const result = await getClaudeCodeSessionHistory({ sessionId, workingDirectory: cwd });
+
+    expect(result).toMatchObject({
+      messages: [{ content: 'nested history' }],
+      sessionFile,
+      sessionId,
+      status: 'found',
+    });
+  });
+
+  it('falls back to other Claude project folders when the current project has no match', async () => {
+    const sessionId = 'session-global-fallback';
+    const cwd = path.join(homeDir, 'workspace-without-history');
+    const otherProjectDir = path.join(homeDir, '.claude', 'projects', 'other-project');
+    await mkdir(otherProjectDir, { recursive: true });
+    const sessionFile = path.join(otherProjectDir, `${sessionId}.jsonl`);
+    await writeJsonl(sessionFile, [
+      { message: { content: 'fallback history', role: 'user' }, uuid: 'uuid-fallback' },
+    ]);
+
+    const result = await getClaudeCodeSessionHistory({ sessionId, workingDirectory: cwd });
+
+    expect(result).toMatchObject({
+      messages: [{ content: 'fallback history' }],
+      sessionFile,
+      sessionId,
+      status: 'found',
+    });
+  });
+
+  it('ignores agent-prefixed jsonl files during fallback scans', async () => {
+    const sessionId = 'agent-session';
+    const cwd = path.join(homeDir, 'workspace');
+    const nestedDir = path.join(
+      homeDir,
+      '.claude',
+      'projects',
+      encodeClaudeProjectDir(cwd),
+      'nested',
+    );
+    await mkdir(nestedDir, { recursive: true });
+    await writeJsonl(path.join(nestedDir, `${sessionId}.jsonl`), [
+      { message: { content: 'agent transcript', role: 'user' }, uuid: 'uuid-agent' },
+    ]);
+
+    const result = await getClaudeCodeSessionHistory({ sessionId, workingDirectory: cwd });
+
+    expect(result).toEqual({ messages: [], sessionId, status: 'missing' });
+  });
+
+  it('returns missing when the matching session file is too large to read', async () => {
+    const sessionId = 'session-too-large';
+    const cwd = path.join(homeDir, 'workspace');
+    const projectDir = path.join(homeDir, '.claude', 'projects', encodeClaudeProjectDir(cwd));
+    await mkdir(projectDir, { recursive: true });
+    const sessionFile = path.join(projectDir, `${sessionId}.jsonl`);
+    await writeFile(sessionFile, '');
+    await truncate(sessionFile, 25 * 1024 * 1024 + 1);
+
+    const result = await getClaudeCodeSessionHistory({ sessionId, workingDirectory: cwd });
+
+    expect(result).toEqual({ messages: [], sessionId, status: 'missing' });
   });
 
   it('rejects session ids with path separators before reading session files', async () => {

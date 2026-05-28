@@ -1,3 +1,6 @@
+/**
+ * @vitest-environment happy-dom
+ */
 import { type UIChatMessage } from '@lobechat/types';
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { type Mock } from 'vitest';
@@ -18,6 +21,20 @@ import { useSessionStore } from '@/store/session';
 import { type ChatTopic } from '@/types/topic';
 
 import { useChatStore } from '../../store';
+
+vi.hoisted(() => {
+  const storage = {
+    clear: vi.fn(),
+    getItem: vi.fn(() => null),
+    removeItem: vi.fn(),
+    setItem: vi.fn(),
+  };
+
+  Object.defineProperty(globalThis, 'localStorage', {
+    configurable: true,
+    value: storage,
+  });
+});
 
 vi.mock('@lobechat/const', async (importOriginal) => {
   const actual = await importOriginal();
@@ -955,6 +972,349 @@ describe('topic action', () => {
         ['CONVERSATION_FETCH_MESSAGES', { agentId, scope: 'main', threadId: null, topicId }],
         latestMessages,
         { revalidate: false },
+      );
+      expect(useChatStore.getState().dbMessagesMap[`main_${agentId}_${topicId}`]).toBe(
+        latestMessages,
+      );
+    });
+
+    it('treats invalid Claude Code history requests as up to date without loading messages', async () => {
+      const { result } = renderHook(() => useChatStore());
+      const topicId = 'topic-claude-code-invalid';
+      const agentId = 'agent-claude-code';
+
+      useChatStore.setState(
+        {
+          activeAgentId: agentId,
+          activeTopicId: topicId,
+          topicDataMap: {
+            [`agent_${agentId}`]: {
+              currentPage: 0,
+              hasMore: false,
+              items: [
+                {
+                  id: topicId,
+                  metadata: {
+                    heteroSessionId: 'cc-session-id',
+                    workingDirectory: '/home/user/project',
+                  },
+                  title: 'Claude Code Topic',
+                } as ChatTopic,
+              ],
+              pageSize: 20,
+              total: 1,
+            },
+          },
+        },
+        false,
+      );
+      useAgentStore.setState(
+        {
+          agentMap: {
+            [agentId]: {
+              agencyConfig: {
+                heterogeneousProvider: { command: 'claude', type: 'claude-code' },
+              },
+            } as any,
+          },
+        },
+        false,
+      );
+      vi.mocked(heterogeneousAgentService.getClaudeCodeSessionHistory).mockResolvedValue({
+        messages: [],
+        sessionId: 'cc-session-id',
+        status: 'invalid_request',
+      });
+
+      let syncResult: Awaited<ReturnType<typeof result.current.syncClaudeCodeHistory>>;
+      await act(async () => {
+        syncResult = await result.current.syncClaudeCodeHistory(topicId);
+      });
+
+      expect(syncResult!).toBe('upToDate');
+      expect(messageService.getMessages).not.toHaveBeenCalled();
+      expect(topicService.updateTopicMetadata).not.toHaveBeenCalled();
+    });
+
+    it('dedupes Claude Code history by source, tool id, assistant tools, and normalized text', async () => {
+      const { result } = renderHook(() => useChatStore());
+      const topicId = 'topic-claude-code-dedupe';
+      const agentId = 'agent-claude-code';
+      const existingMessages = [
+        {
+          content: 'same source',
+          id: 'msg-source',
+          metadata: { claudeCode: { sourceEventId: 'event-source' } },
+          role: 'user',
+        },
+        {
+          content: 'old tool output',
+          id: 'msg-tool',
+          role: 'tool',
+          tool_call_id: 'toolu_existing',
+        },
+        {
+          content: 'old tool call',
+          id: 'msg-assistant-tools',
+          role: 'assistant',
+          tools: [{ id: 'toolu_existing_assistant' }],
+        },
+        { content: 'same   text\nvalue', id: 'msg-text', role: 'user' },
+      ] as UIChatMessage[];
+
+      useChatStore.setState(
+        {
+          activeAgentId: agentId,
+          activeTopicId: topicId,
+          topicDataMap: {
+            [`agent_${agentId}`]: {
+              currentPage: 0,
+              hasMore: false,
+              items: [
+                {
+                  id: topicId,
+                  metadata: {
+                    heteroSessionId: 'cc-session-id',
+                    workingDirectory: '/home/user/project',
+                  },
+                  title: 'Claude Code Topic',
+                } as ChatTopic,
+              ],
+              pageSize: 20,
+              total: 1,
+            },
+          },
+        },
+        false,
+      );
+      useAgentStore.setState(
+        {
+          agentMap: {
+            [agentId]: {
+              agencyConfig: {
+                heterogeneousProvider: { command: 'claude', type: 'claude-code' },
+              },
+            } as any,
+          },
+        },
+        false,
+      );
+      vi.mocked(messageService.getMessages).mockResolvedValue(existingMessages);
+      vi.mocked(heterogeneousAgentService.getClaudeCodeSessionHistory).mockResolvedValue({
+        messages: [
+          {
+            content: 'different source text',
+            lineNumber: 1,
+            role: 'user',
+            sourceEventId: 'event-source',
+          },
+          {
+            content: 'different tool text',
+            lineNumber: 2,
+            role: 'tool',
+            sourceEventId: 'event-tool',
+            toolCallId: 'toolu_existing',
+          },
+          {
+            content: '',
+            lineNumber: 3,
+            role: 'assistant',
+            sourceEventId: 'event-assistant-tools',
+            tools: [{ arguments: '{}', id: 'toolu_existing_assistant', name: 'Read' }],
+          },
+          { content: 'same text value', lineNumber: 4, role: 'user', sourceEventId: 'event-text' },
+        ],
+        sessionFile: '/home/user/.claude/projects/project/cc-session-id.jsonl',
+        sessionId: 'cc-session-id',
+        status: 'found',
+      });
+
+      let syncResult: Awaited<ReturnType<typeof result.current.syncClaudeCodeHistory>>;
+      await act(async () => {
+        syncResult = await result.current.syncClaudeCodeHistory(topicId);
+      });
+
+      expect(syncResult!).toBe('upToDate');
+      expect(messageService.createMessage).not.toHaveBeenCalled();
+      expect(topicService.updateTopicMetadata).not.toHaveBeenCalled();
+      expect(mutate).toHaveBeenCalledWith(
+        ['CONVERSATION_FETCH_MESSAGES', { agentId, scope: 'main', threadId: null, topicId }],
+        existingMessages,
+        { revalidate: false },
+      );
+      expect(useChatStore.getState().dbMessagesMap[`main_${agentId}_${topicId}`]).toBe(
+        existingMessages,
+      );
+    });
+
+    it('imports assistant tool calls and links later tool results back to the assistant message', async () => {
+      const { result } = renderHook(() => useChatStore());
+      const topicId = 'topic-claude-code-tools';
+      const agentId = 'agent-claude-code';
+      const existingMessages = [
+        { content: 'please inspect files', id: 'existing-parent', role: 'user' },
+      ] as UIChatMessage[];
+      const latestMessages = [
+        { content: 'I will inspect files.', id: 'imported-assistant-message', role: 'assistant' },
+        { content: 'file contents', id: 'imported-read-result', role: 'tool' },
+        { content: 'shell output', id: 'imported-bash-result', role: 'tool' },
+      ] as UIChatMessage[];
+
+      useChatStore.setState(
+        {
+          activeAgentId: agentId,
+          activeTopicId: topicId,
+          topicDataMap: {
+            [`agent_${agentId}`]: {
+              currentPage: 0,
+              hasMore: false,
+              items: [
+                {
+                  id: topicId,
+                  metadata: {
+                    heteroSessionId: 'cc-session-id',
+                    workingDirectory: '/home/user/project',
+                  },
+                  title: 'Claude Code Topic',
+                } as ChatTopic,
+              ],
+              pageSize: 20,
+              total: 1,
+            },
+          },
+        },
+        false,
+      );
+      useAgentStore.setState(
+        {
+          agentMap: {
+            [agentId]: {
+              agencyConfig: {
+                heterogeneousProvider: { command: 'claude', type: 'claude-code' },
+              },
+            } as any,
+          },
+        },
+        false,
+      );
+      vi.mocked(messageService.getMessages)
+        .mockResolvedValueOnce(existingMessages)
+        .mockResolvedValueOnce(latestMessages);
+      vi.mocked(messageService.createMessage)
+        .mockResolvedValueOnce({ id: 'imported-assistant-message' } as any)
+        .mockResolvedValueOnce({ id: 'imported-read-result' } as any)
+        .mockResolvedValueOnce({ id: 'imported-bash-result' } as any);
+      vi.mocked(topicService.updateTopicMetadata).mockResolvedValue(undefined as never);
+      vi.mocked(heterogeneousAgentService.getClaudeCodeSessionHistory).mockResolvedValue({
+        messages: [
+          {
+            content: 'I will inspect files.',
+            lineNumber: 1,
+            messageId: 'msg-assistant',
+            reasoning: 'Need to read and run a command',
+            role: 'assistant',
+            sourceEventId: 'event-assistant',
+            timestamp: '2026-05-17T00:00:00.000Z',
+            tools: [
+              { arguments: '{"file_path":"src/a.ts"}', id: 'toolu_read', name: 'Read' },
+              { arguments: '{"command":"pwd"}', id: 'toolu_bash', name: 'Bash' },
+            ],
+            uuid: 'uuid-assistant',
+          },
+          {
+            content: 'file contents',
+            lineNumber: 2,
+            parentUuid: 'uuid-assistant',
+            role: 'tool',
+            sourceEventId: 'event-read-result',
+            timestamp: 'not-a-date',
+            toolCallId: 'toolu_read',
+          },
+          {
+            content: 'shell output',
+            lineNumber: 3,
+            parentUuid: 'uuid-assistant',
+            role: 'tool',
+            sourceEventId: 'event-bash-result',
+            toolCallId: 'toolu_bash',
+          },
+        ],
+        sessionFile: '/home/user/.claude/projects/project/cc-session-id.jsonl',
+        sessionId: 'cc-session-id',
+        status: 'found',
+      });
+
+      let syncResult: Awaited<ReturnType<typeof result.current.syncClaudeCodeHistory>>;
+      await act(async () => {
+        syncResult = await result.current.syncClaudeCodeHistory(topicId);
+      });
+
+      expect(syncResult!).toBe('synced');
+      expect(messageService.createMessage).toHaveBeenCalledTimes(3);
+      expect(messageService.createMessage).toHaveBeenNthCalledWith(
+        1,
+        expect.objectContaining({
+          agentId,
+          content: 'I will inspect files.',
+          createdAt: expect.any(Date),
+          parentId: 'existing-parent',
+          reasoning: { content: 'Need to read and run a command' },
+          role: 'assistant',
+          tools: [
+            expect.objectContaining({ id: 'toolu_read', result_msg_id: undefined }),
+            expect.objectContaining({ id: 'toolu_bash', result_msg_id: undefined }),
+          ],
+          topicId,
+        }),
+      );
+      expect(messageService.createMessage).toHaveBeenNthCalledWith(
+        2,
+        expect.not.objectContaining({ createdAt: expect.any(Date) }),
+      );
+      expect(messageService.createMessage).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({
+          content: 'file contents',
+          parentId: 'imported-assistant-message',
+          plugin: expect.objectContaining({
+            apiName: 'Read',
+            arguments: '{"file_path":"src/a.ts"}',
+            identifier: 'claude-code',
+          }),
+          role: 'tool',
+          tool_call_id: 'toolu_read',
+        }),
+      );
+      expect(messageService.createMessage).toHaveBeenNthCalledWith(
+        3,
+        expect.objectContaining({
+          content: 'shell output',
+          parentId: 'imported-assistant-message',
+          plugin: expect.objectContaining({
+            apiName: 'Bash',
+            arguments: '{"command":"pwd"}',
+            identifier: 'claude-code',
+          }),
+          role: 'tool',
+          tool_call_id: 'toolu_bash',
+        }),
+      );
+      expect(messageService.updateMessage).toHaveBeenCalledWith(
+        'imported-assistant-message',
+        {
+          tools: [
+            expect.objectContaining({ id: 'toolu_read', result_msg_id: 'imported-read-result' }),
+            expect.objectContaining({ id: 'toolu_bash', result_msg_id: 'imported-bash-result' }),
+          ],
+        },
+        { agentId, topicId },
+      );
+      expect(topicService.updateTopicMetadata).toHaveBeenCalledWith(
+        topicId,
+        expect.objectContaining({
+          claudeCodeHistoryLastEventId: 'event-bash-result',
+          claudeCodeHistorySourcePath: '/home/user/.claude/projects/project/cc-session-id.jsonl',
+        }),
       );
       expect(useChatStore.getState().dbMessagesMap[`main_${agentId}_${topicId}`]).toBe(
         latestMessages,
