@@ -291,7 +291,7 @@ describe('ChatHydration', () => {
       search: '',
     });
     act(() => {
-      useChatStore.setState({ activeTopicId: null }, false);
+      useChatStore.setState({ activeTopicId: undefined }, false);
     });
 
     await waitFor(() => {
