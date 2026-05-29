@@ -2,6 +2,7 @@
  * @vitest-environment happy-dom
  */
 import { act, render, screen, waitFor } from '@testing-library/react';
+import type * as ReactRouterDom from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { useAgentStore } from '@/store/agent';
@@ -30,7 +31,7 @@ vi.hoisted(() => {
 });
 
 vi.mock('react-router-dom', async () => {
-  const actual = (await vi.importActual('react-router-dom')) as typeof import('react-router-dom');
+  const actual = await vi.importActual<typeof ReactRouterDom>('react-router-dom');
 
   return {
     ...actual,
