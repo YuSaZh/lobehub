@@ -1,0 +1,290 @@
+name: Sync Upstream Main and Publish Patched Docker Image
+
+on:
+  # GitHub schedules run from the repository default branch. This fork's
+  # default branch is canary; the job guard below makes that contract explicit.
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: upstream-patched-docker
+  cancel-in-progress: false
+
+env:
+  REGISTRY_IMAGE: ghcr.io/yusazh/lobehub
+  UPSTREAM_REPOSITORY: lobehub/lobehub
+  PATCH_SOURCE_BRANCH: feature/model-capability-overrides
+  PATCH_MANIFEST: patches/model-capability-overrides.paths
+  PATCH_CONTROL_MANIFEST: .github/workflows/model-capability-overrides-control.paths
+  PATCH_ARTIFACT_NAME: model-capability-patch
+
+jobs:
+  resolve:
+    name: Resolve upstream and patch
+    if: github.repository == 'YuSaZh/lobehub' && github.ref == 'refs/heads/canary'
+    runs-on: ubuntu-latest
+    outputs:
+      upstream_sha: ${{ steps.resolve.outputs.upstream_sha }}
+      patch_ref_sha: ${{ steps.resolve.outputs.patch_ref_sha }}
+      patch_hash: ${{ steps.resolve.outputs.patch_hash }}
+      version: ${{ steps.resolve.outputs.version }}
+      build_tag: ${{ steps.resolve.outputs.build_tag }}
+      skip: ${{ steps.existing.outputs.skip }}
+    steps:
+      - name: Checkout control branch
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Fetch upstream and patch source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git remote add upstream "https://github.com/${UPSTREAM_REPOSITORY}.git"
+          git fetch --no-tags upstream main
+          git fetch --tags upstream
+          git fetch origin "refs/heads/${PATCH_SOURCE_BRANCH}:refs/remotes/origin/${PATCH_SOURCE_BRANCH}"
+
+      - name: Resolve immutable inputs and generate patch
+        id: resolve
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          upstream_sha="$(git rev-parse upstream/main)"
+          patch_ref="origin/${PATCH_SOURCE_BRANCH}"
+          patch_ref_sha="$(git rev-parse "$patch_ref")"
+
+          if [ ! -f "$PATCH_MANIFEST" ]; then
+            echo "::error::Missing patch path manifest: $PATCH_MANIFEST"
+            exit 1
+          fi
+          generated_patch="$RUNNER_TEMP/model-capability-overrides.patch"
+          bash .github/scripts/create-model-capability-patch.sh \
+            upstream/main "$patch_ref" "$generated_patch" "$PATCH_MANIFEST" "$PATCH_CONTROL_MANIFEST"
+
+          overlay_dir="$RUNNER_TEMP/lobehub-overlay"
+          git worktree add --detach "$overlay_dir" "$upstream_sha"
+          git -C "$overlay_dir" apply --check "$generated_patch"
+          git -C "$overlay_dir" apply --whitespace=error "$generated_patch"
+          git -C "$overlay_dir" diff --check
+
+          patch_hash="$(sha256sum "$generated_patch" | cut -d ' ' -f 1)"
+          stable_tag="$(git tag --points-at "$upstream_sha" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1 || true)"
+          if [ -z "$stable_tag" ]; then
+            echo "::error::upstream/main is not exactly tagged with a stable vX.Y.Z release: $upstream_sha"
+            exit 1
+          fi
+
+          version="${stable_tag#v}"
+          build_tag="build-${upstream_sha:0:12}-${patch_hash}"
+          {
+            echo "upstream_sha=$upstream_sha"
+            echo "patch_ref_sha=$patch_ref_sha"
+            echo "patch_hash=$patch_hash"
+            echo "version=$version"
+            echo "build_tag=$build_tag"
+          } >> "$GITHUB_OUTPUT"
+          echo "Upstream: $upstream_sha ($stable_tag)"
+          echo "Patch source: $patch_ref ($patch_ref_sha)"
+          echo "Patch content SHA-256: $patch_hash"
+          echo "Immutable image tag: $build_tag"
+
+      - name: Upload generated patch artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ env.PATCH_ARTIFACT_NAME }}
+          path: ${{ runner.temp }}/model-capability-overrides.patch
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Skip when the complete manifest already exists
+        id: existing
+        shell: bash
+        env:
+          BUILD_TAG: ${{ steps.resolve.outputs.build_tag }}
+        run: |
+          set -euo pipefail
+          if docker buildx imagetools inspect "$REGISTRY_IMAGE:$BUILD_TAG" >/dev/null 2>&1; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Immutable image already exists: $REGISTRY_IMAGE:$BUILD_TAG"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "Immutable image is absent; building $REGISTRY_IMAGE:$BUILD_TAG"
+          fi
+
+  build:
+    name: Build ${{ matrix.platform }} image
+    needs: resolve
+    if: needs.resolve.outputs.skip != 'true'
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - platform: linux/amd64
+            os: ubuntu-latest
+          - platform: linux/arm64
+            os: ubuntu-24.04-arm
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Prepare platform name
+        shell: bash
+        run: |
+          set -euo pipefail
+          platform='${{ matrix.platform }}'
+          echo "PLATFORM_PAIR=${platform//\//-}" >> "$GITHUB_ENV"
+
+      - name: Checkout control branch
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Download generated patch
+        uses: actions/download-artifact@v7
+        with:
+          name: ${{ env.PATCH_ARTIFACT_NAME }}
+          path: ${{ runner.temp }}/patch
+
+      - name: Fetch and pin upstream main
+        shell: bash
+        env:
+          EXPECTED_UPSTREAM_SHA: ${{ needs.resolve.outputs.upstream_sha }}
+        run: |
+          set -euo pipefail
+          git remote add upstream "https://github.com/${UPSTREAM_REPOSITORY}.git"
+          git fetch --no-tags upstream main
+          actual_sha="$(git rev-parse upstream/main)"
+          if [ "$actual_sha" != "$EXPECTED_UPSTREAM_SHA" ]; then
+            echo "::error::upstream/main moved during this run ($actual_sha != $EXPECTED_UPSTREAM_SHA)"
+            exit 1
+          fi
+
+          overlay_dir="$RUNNER_TEMP/lobehub-overlay"
+          patch_file="$RUNNER_TEMP/patch/model-capability-overrides.patch"
+          test -s "$patch_file"
+          git worktree add --detach "$overlay_dir" "$EXPECTED_UPSTREAM_SHA"
+          git -C "$overlay_dir" apply --check "$patch_file"
+          git -C "$overlay_dir" apply --whitespace=error "$patch_file"
+          git -C "$overlay_dir" diff --check
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          platforms: ${{ matrix.platform }}
+          context: ${{ runner.temp }}/lobehub-overlay
+          file: ${{ runner.temp }}/lobehub-overlay/Dockerfile
+          build-args: |
+            SHA=${{ needs.resolve.outputs.upstream_sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ env.UPSTREAM_REPOSITORY }}
+            org.opencontainers.image.version=${{ needs.resolve.outputs.version }}
+            org.opencontainers.image.revision=${{ needs.resolve.outputs.upstream_sha }}
+            io.yusazh.lobehub.upstream-sha=${{ needs.resolve.outputs.upstream_sha }}
+            io.yusazh.lobehub.patch-ref-sha=${{ needs.resolve.outputs.patch_ref_sha }}
+            io.yusazh.lobehub.patch-sha256=${{ needs.resolve.outputs.patch_hash }}
+          outputs: type=image,name=${{ env.REGISTRY_IMAGE }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Export digest
+        shell: bash
+        run: |
+          set -euo pipefail
+          digest='${{ steps.build.outputs.digest }}'
+          test -n "$digest"
+          digest_dir="$RUNNER_TEMP/digests"
+          rm -rf "$digest_dir"
+          mkdir -p "$digest_dir"
+          touch "$digest_dir/${digest#sha256:}"
+
+      - name: Upload digest artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: digest-${{ env.PLATFORM_PAIR }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish versioned manifest
+    needs:
+      - resolve
+      - build
+    if: needs.resolve.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download platform digests
+        uses: actions/download-artifact@v7
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create and publish manifest tags
+        shell: bash
+        env:
+          DIGEST_DIR: ${{ runner.temp }}/digests
+          VERSION: ${{ needs.resolve.outputs.version }}
+          BUILD_TAG: ${{ needs.resolve.outputs.build_tag }}
+        run: |
+          set -euo pipefail
+          mapfile -t digest_files < <(find "$DIGEST_DIR" -maxdepth 1 -type f -printf '%f\n' | sort)
+          test "${#digest_files[@]}" -eq 2
+
+          digest_refs=()
+          for digest in "${digest_files[@]}"; do
+            [[ "$digest" =~ ^[0-9a-f]{64}$ ]]
+            digest_refs+=("$REGISTRY_IMAGE@sha256:$digest")
+          done
+
+          docker buildx imagetools create \
+            --tag "$REGISTRY_IMAGE:$VERSION" \
+            --tag "$REGISTRY_IMAGE:v$VERSION" \
+            --tag "$REGISTRY_IMAGE:latest" \
+            --tag "$REGISTRY_IMAGE:model-capability-overrides" \
+            --tag "$REGISTRY_IMAGE:$BUILD_TAG" \
+            "${digest_refs[@]}"
+
+      - name: Inspect published manifest
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+          BUILD_TAG: ${{ needs.resolve.outputs.build_tag }}
+        run: |
+          docker buildx imagetools inspect "$REGISTRY_IMAGE:$VERSION"
+          docker buildx imagetools inspect "$REGISTRY_IMAGE:$BUILD_TAG"

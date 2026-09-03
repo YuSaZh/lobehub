@@ -1,0 +1,7 @@
+# One repository-relative path per line. Keep this list limited to the model
+# capability override implementation and its regression coverage.
+packages/database/src/repositories/aiInfra/index.ts
+packages/database/src/repositories/aiInfra/modelCapabilityOverrides.ts
+packages/database/src/repositories/aiInfra/modelCapabilityOverrides.test.ts
+apps/server/src/modules/AgentRuntime/adapters/serverCallLlmContextHints.ts
+apps/server/src/modules/AgentRuntime/adapters/serverCallLlmContextHints.test.ts

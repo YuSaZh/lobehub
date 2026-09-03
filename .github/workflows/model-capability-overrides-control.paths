@@ -1,0 +1,3 @@
+# Changes to these control-plane files are audited but never included in the
+# source patch applied to upstream/main.
+.github/workflows/build-custom-docker.yml
