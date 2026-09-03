@@ -17,6 +17,7 @@ import {
 } from 'model-bank';
 
 import { AiModelModel } from '@/database/models/aiModel';
+import { getEffectiveModelAbilities } from '@/database/repositories/aiInfra/modelCapabilityOverrides';
 
 import type { RuntimeExecutorContext } from '../context';
 import { log } from '../executorHelpers';
@@ -225,17 +226,30 @@ export const resolveServerCallLlmContextHints = async ({
     builtinModels.find((item) => item.id === targetModel && item.providerId === targetProvider) ??
     builtinModels.find((item) => item.id === targetModel);
 
+  const getModelAbilities = (targetModel: string, targetProvider: string) =>
+    getEffectiveModelAbilities(
+      targetProvider,
+      targetModel,
+      findModelInfo(targetModel, targetProvider)?.abilities,
+    );
+  const getExactModelAbilities = (targetModel: string, targetProvider: string) =>
+    getEffectiveModelAbilities(
+      targetProvider,
+      targetModel,
+      builtinModels.find((item) => item.id === targetModel && item.providerId === targetProvider)
+        ?.abilities,
+    );
+
   return {
     capabilities: {
       isCanUseAudio: (targetModel, targetProvider) =>
-        findModelInfo(targetModel, targetProvider)?.abilities?.audio ?? false,
+        getModelAbilities(targetModel, targetProvider)?.audio ?? false,
       isCanUseFC: (targetModel, targetProvider) =>
-        builtinModels.find((item) => item.id === targetModel && item.providerId === targetProvider)
-          ?.abilities?.functionCall ?? true,
+        getExactModelAbilities(targetModel, targetProvider)?.functionCall ?? true,
       isCanUseVideo: (targetModel, targetProvider) =>
-        findModelInfo(targetModel, targetProvider)?.abilities?.video ?? false,
+        getModelAbilities(targetModel, targetProvider)?.video ?? false,
       isCanUseVision: (targetModel, targetProvider) =>
-        findModelInfo(targetModel, targetProvider)?.abilities?.vision ?? false,
+        getModelAbilities(targetModel, targetProvider)?.vision ?? false,
     },
     messagesForContext,
     modelDisplayName,

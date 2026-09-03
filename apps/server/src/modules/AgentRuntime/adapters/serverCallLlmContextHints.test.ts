@@ -1,5 +1,14 @@
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+
 import type { CallLLMPayload } from '@lobechat/agent-runtime';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+import {
+  MODEL_CAPABILITY_OVERRIDES_PATH_ENV,
+  resetModelCapabilityOverridesCache,
+} from '@/database/repositories/aiInfra/modelCapabilityOverrides';
 
 import type { RuntimeExecutorContext } from '../context';
 import { resolveServerCallLlmContextHints } from './serverCallLlmContextHints';
@@ -32,9 +41,15 @@ const createCtx = (agentConfig: any): RuntimeExecutorContext =>
   }) satisfies RuntimeExecutorContext;
 
 const llmPayload = { messages: [] } as unknown as CallLLMPayload;
+let originalOverridesPath: string | undefined;
+let tempDirectory: string;
 
 beforeEach(() => {
   vi.clearAllMocks();
+  originalOverridesPath = process.env[MODEL_CAPABILITY_OVERRIDES_PATH_ENV];
+  delete process.env[MODEL_CAPABILITY_OVERRIDES_PATH_ENV];
+  tempDirectory = mkdtempSync(path.join(tmpdir(), 'lobehub-server-capability-overrides-'));
+  resetModelCapabilityOverridesCache();
 
   loadModelsMock.mockResolvedValue([
     {
@@ -68,6 +83,58 @@ beforeEach(() => {
   ]);
   findByIdAndProviderMock.mockResolvedValue(undefined);
   getModelReasoningConfigMock.mockResolvedValue(undefined);
+});
+
+afterEach(() => {
+  if (originalOverridesPath === undefined) {
+    delete process.env[MODEL_CAPABILITY_OVERRIDES_PATH_ENV];
+  } else {
+    process.env[MODEL_CAPABILITY_OVERRIDES_PATH_ENV] = originalOverridesPath;
+  }
+  resetModelCapabilityOverridesCache();
+  rmSync(tempDirectory, { force: true, recursive: true });
+});
+
+describe('resolveServerCallLlmContextHints - model capability overrides', () => {
+  it('uses an override for a custom model absent from the model bank', async () => {
+    const overridesPath = path.join(tempDirectory, 'model-capability-overrides.json');
+    writeFileSync(
+      overridesPath,
+      JSON.stringify({
+        models: [
+          {
+            abilities: { vision: true },
+            modelId: 'my-custom-model',
+            providerId: 'custom-provider',
+          },
+        ],
+        version: 1,
+      }),
+      'utf8',
+    );
+    process.env[MODEL_CAPABILITY_OVERRIDES_PATH_ENV] = overridesPath;
+    resetModelCapabilityOverridesCache();
+
+    const hints = await resolveServerCallLlmContextHints({
+      ctx: createCtx({}),
+      llmPayload,
+      model: 'my-custom-model',
+      provider: 'custom-provider',
+    });
+
+    expect(hints.capabilities.isCanUseVision('my-custom-model', 'custom-provider')).toBe(true);
+  });
+
+  it('keeps vision unavailable for a model absent from the model bank without an override', async () => {
+    const hints = await resolveServerCallLlmContextHints({
+      ctx: createCtx({}),
+      llmPayload,
+      model: 'my-custom-model',
+      provider: 'custom-provider',
+    });
+
+    expect(hints.capabilities.isCanUseVision('my-custom-model', 'custom-provider')).toBe(false);
+  });
 });
 
 describe('resolveServerCallLlmContextHints - model-instance reasoning config', () => {
