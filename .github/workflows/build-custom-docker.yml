@@ -1,9 +1,6 @@
 name: Build Model Capability Overrides Docker Image
 
 on:
-  push:
-    branches:
-      - feature/model-capability-overrides
   workflow_dispatch: {}
 
 permissions:
