@@ -205,8 +205,10 @@ export const params = {
       },
       {
         apiType: 'google',
-        models: LOBE_DEFAULT_MODEL_LIST.map((m) => m.id).filter(
-          (id) => detectModelProvider(id) === 'google',
+        models: resolveProviderRouteModels(
+          'google',
+          LOBE_DEFAULT_MODEL_LIST,
+          runtimeContext?.model,
         ),
         options: {
           ...options,

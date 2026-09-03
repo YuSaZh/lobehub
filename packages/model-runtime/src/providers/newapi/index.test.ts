@@ -1,5 +1,5 @@
 // @vitest-environment node
-import { ModelProvider } from 'model-bank';
+import { LOBE_DEFAULT_MODEL_LIST, ModelProvider } from 'model-bank';
 import type { Mock } from 'vitest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -790,6 +790,28 @@ describe('NewAPI Runtime - 100% Branch Coverage', () => {
 
       expect(routers[1].models).toBeDefined();
       expect(Array.isArray(routers[1].models)).toBe(true);
+    });
+
+    it('should add a detected Google model missing from the static list only to the Google router', () => {
+      const requestedModel = 'gemini-3.8-flash';
+
+      expect(LOBE_DEFAULT_MODEL_LIST.some(({ id }) => id === requestedModel)).toBe(false);
+
+      mockDetectModelProvider.mockImplementation((id: string) => {
+        if (id.includes('gemini')) return 'google';
+        if (id.includes('deepseek')) return 'deepseek';
+        return 'openai';
+      });
+
+      const routers = params.routers(
+        { apiKey: 'test', baseURL: 'https://custom.com' },
+        { model: requestedModel },
+      );
+
+      expect(routers[1].models).toContain(requestedModel);
+      expect(routers[0].models).not.toContain(requestedModel);
+      expect(routers[2].models).not.toContain(requestedModel);
+      expect(routers[3].models).not.toContain(requestedModel);
     });
 
     it('should filter xai models for xai router', () => {
