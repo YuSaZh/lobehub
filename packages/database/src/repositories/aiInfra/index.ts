@@ -23,6 +23,7 @@ import { merge, mergeArrayById } from '@/utils/merge';
 import { AiModelModel } from '../../models/aiModel';
 import { AiProviderModel } from '../../models/aiProvider';
 import type { LobeChatDatabase } from '../../type';
+import { getEffectiveModelAbilities } from './modelCapabilityOverrides';
 
 type DecryptUserKeyVaults = (encryptKeyVaultsStr: string | null) => Promise<any>;
 
@@ -158,13 +159,17 @@ export class AiInfraRepos {
             if (!user)
               return injectSearchSettings(provider.id, {
                 ...item,
-                abilities: item.abilities || {},
+                abilities: getEffectiveModelAbilities(provider.id, item.id, item.abilities || {}),
                 providerId: provider.id,
               });
 
             const mergedModel = {
               ...item,
-              abilities: !isEmpty(user.abilities) ? user.abilities : item.abilities || {},
+              abilities: getEffectiveModelAbilities(
+                provider.id,
+                item.id,
+                !isEmpty(user.abilities) ? user.abilities : item.abilities || {},
+              ),
               // Deep-merge instead of replacing: a user row holding only a
               // reasoning preference (`config.chatConfig`) must not drop the
               // builtin card's `config.deploymentName` (Azure/Volcengine-style
@@ -205,7 +210,11 @@ export class AiInfraRepos {
         return filterEnabled ? enabledProviderIds.has(item.providerId) && item.enabled : true;
       })
       .map((item) =>
-        injectSearchSettings(item.providerId, { ...item, type: normalizeAiModelType(item.type) }),
+        injectSearchSettings(item.providerId, {
+          ...item,
+          abilities: getEffectiveModelAbilities(item.providerId, item.id, item.abilities),
+          type: normalizeAiModelType(item.type),
+        }),
       );
 
     return [...builtinModels, ...appendedUserModels].sort(
@@ -395,7 +404,10 @@ export class AiInfraRepos {
     mergedModel = mergedModel.filter(isAiModelVisible);
 
     let list = mergedModel.map((m) =>
-      injectSearchSettings(providerId, m),
+      injectSearchSettings(providerId, {
+        ...m,
+        abilities: getEffectiveModelAbilities(providerId, m.id, m.abilities),
+      }),
     ) as AiProviderModelListItem[];
 
     if (typeof options?.enabled === 'boolean') {
