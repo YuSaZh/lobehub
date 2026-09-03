@@ -5,3 +5,5 @@ packages/database/src/repositories/aiInfra/modelCapabilityOverrides.ts
 packages/database/src/repositories/aiInfra/modelCapabilityOverrides.test.ts
 apps/server/src/modules/AgentRuntime/adapters/serverCallLlmContextHints.ts
 apps/server/src/modules/AgentRuntime/adapters/serverCallLlmContextHints.test.ts
+packages/model-runtime/src/providers/newapi/index.ts
+packages/model-runtime/src/providers/newapi/index.test.ts
