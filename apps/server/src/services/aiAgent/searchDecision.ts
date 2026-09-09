@@ -2,6 +2,8 @@ import type { ModelSearchImplementType, SearchDecision } from 'model-bank';
 import { resolveModelSearchDefaultSettings, resolveSearchDecision } from 'model-bank';
 import { DEFAULT_MODEL_PROVIDER_LIST } from 'model-bank/modelProviders';
 
+import { getEffectiveModelAbilities } from '@/database/repositories/aiInfra/modelCapabilityOverrides';
+
 interface SearchModelCard {
   abilities?: { search?: boolean };
   config?: { deploymentName?: string };
@@ -42,9 +44,11 @@ export const resolveServerSearchDecision = ({
     (item) =>
       item.providerId === provider && (item.id === model || item.config?.deploymentName === model),
   );
-  const resolvedModelSearchAbility = hasModelAbilitiesOverride
-    ? modelSearchAbility
-    : (modelSearchAbility ?? builtinModel?.abilities?.search);
+  const resolvedModelSearchAbility =
+    getEffectiveModelAbilities(provider, model)?.search ??
+    (hasModelAbilitiesOverride
+      ? modelSearchAbility
+      : (modelSearchAbility ?? builtinModel?.abilities?.search));
   const explicitModelSearchImpl = modelSearchImpl ?? builtinModel?.settings?.searchImpl;
   const resolvedModelSearchImpl =
     resolvedModelSearchAbility === false
