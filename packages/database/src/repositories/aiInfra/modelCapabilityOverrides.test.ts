@@ -81,6 +81,67 @@ describe('model capability overrides', () => {
     });
   });
 
+  it('applies a global override to the same exact model ID across providers', () => {
+    writeOverrides({
+      models: [{ abilities: { search: false, vision: true }, modelId: 'gpt-6-astra' }],
+      version: 1,
+    });
+
+    for (const providerId of ['openai', 'niniapi', 'custom-provider']) {
+      expect(
+        getEffectiveModelAbilities(providerId, 'gpt-6-astra', { reasoning: true, search: true }),
+      ).toEqual({ reasoning: true, search: false, vision: true });
+    }
+    expect(getEffectiveModelAbilities('niniapi', 'gpt-6-astra')).toEqual({
+      search: false,
+      vision: true,
+    });
+    const abilities = { vision: false };
+    for (const modelId of ['GPT-6-Astra', 'gpt-6-astra-fast', 'other-model']) {
+      expect(getEffectiveModelAbilities('niniapi', modelId, abilities)).toBe(abilities);
+    }
+  });
+
+  it.each([false, true])(
+    'merges provider overrides last regardless of file order (%s)',
+    (reverse) => {
+      const models = [
+        { abilities: { search: true, vision: true }, modelId: 'gpt-6-astra' },
+        {
+          abilities: { reasoning: true, vision: false },
+          modelId: 'gpt-6-astra',
+          providerId: 'niniapi',
+        },
+      ];
+      writeOverrides({ models: reverse ? models.toReversed() : models, version: 1 });
+
+      expect(getEffectiveModelAbilities('niniapi', 'gpt-6-astra', { functionCall: true })).toEqual({
+        functionCall: true,
+        reasoning: true,
+        search: true,
+        vision: false,
+      });
+      expect(getEffectiveModelAbilities('openai', 'gpt-6-astra')).toEqual({
+        search: true,
+        vision: true,
+      });
+    },
+  );
+
+  it('keeps provider-only rules isolated and treats a literal star as an exact provider ID', () => {
+    writeOverrides({
+      models: [
+        { abilities: { vision: true }, modelId: 'gpt-6-astra', providerId: 'niniapi' },
+        { abilities: { vision: false }, modelId: 'gpt-6-astra', providerId: '*' },
+      ],
+      version: 1,
+    });
+
+    expect(getEffectiveModelAbilities('niniapi', 'gpt-6-astra')).toEqual({ vision: true });
+    expect(getEffectiveModelAbilities('*', 'gpt-6-astra')).toEqual({ vision: false });
+    expect(getEffectiveModelAbilities('openai', 'gpt-6-astra')).toBeUndefined();
+  });
+
   it('caches file contents until the process-local cache is reset', () => {
     writeOverrides({
       models: [{ abilities: { vision: true }, modelId: 'gpt-4', providerId: 'openai' }],
@@ -105,6 +166,23 @@ describe('model capability overrides', () => {
   });
 
   it.each([
+    {
+      name: 'duplicate global model',
+      value: {
+        models: [
+          { abilities: { vision: true }, modelId: 'gpt-6-astra' },
+          { abilities: { vision: false }, modelId: 'gpt-6-astra' },
+        ],
+        version: 1,
+      },
+    },
+    {
+      name: 'null provider id',
+      value: {
+        models: [{ abilities: {}, modelId: 'gpt-6-astra', providerId: null }],
+        version: 1,
+      },
+    },
     {
       name: 'duplicate provider and model',
       value: {

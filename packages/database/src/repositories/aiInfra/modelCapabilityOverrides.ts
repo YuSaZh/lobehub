@@ -26,9 +26,12 @@ const modelCapabilityOverrideSchema = z
     modelId: z.string().refine((value) => value.trim().length > 0, {
       message: 'modelId must not be empty',
     }),
-    providerId: z.string().refine((value) => value.trim().length > 0, {
-      message: 'providerId must not be empty',
-    }),
+    providerId: z
+      .string()
+      .refine((value) => value.trim().length > 0, {
+        message: 'providerId must not be empty',
+      })
+      .optional(),
   })
   .strict();
 
@@ -39,7 +42,7 @@ const modelCapabilityOverridesSchema = z
   })
   .strict()
   .superRefine((value, context) => {
-    const seen = new Map<string, Set<string>>();
+    const seen = new Map<string | undefined, Set<string>>();
 
     for (const [index, model] of value.models.entries()) {
       const providerModels = seen.get(model.providerId);
@@ -60,7 +63,7 @@ const modelCapabilityOverridesSchema = z
   });
 
 type ModelCapabilityOverrides = z.infer<typeof modelCapabilityOverridesSchema>;
-type ModelCapabilityOverrideMap = Map<string, Map<string, ModelAbilities>>;
+type ModelCapabilityOverrideMap = Map<string | undefined, Map<string, ModelAbilities>>;
 
 let cachedPath: string | undefined;
 let cachedOverrides: ModelCapabilityOverrideMap | undefined;
@@ -131,10 +134,13 @@ export const getEffectiveModelAbilities = (
   modelId: string,
   abilities?: ModelAbilities,
 ): ModelAbilities | undefined => {
-  const override = getModelCapabilityOverrides()?.get(providerId)?.get(modelId);
-  if (!override) return abilities;
+  const overrides = getModelCapabilityOverrides();
+  // An omitted provider ID defines a global rule; explicit IDs remain exact matches.
+  const globalOverride = overrides?.get(undefined)?.get(modelId);
+  const providerOverride = overrides?.get(providerId)?.get(modelId);
+  if (!globalOverride && !providerOverride) return abilities;
 
-  return { ...abilities, ...override };
+  return { ...abilities, ...globalOverride, ...providerOverride };
 };
 
 /** Reset the process-local cache so tests can isolate environment and file changes. */
